@@ -1,0 +1,820 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Tank ECS Engine - Phase 1</title>
+    <style>
+        body, html { margin: 0; padding: 0; overflow: hidden; background: #222; }
+        canvas { display: block; }
+    </style>
+</head>
+<body>
+<canvas id="gameCanvas"></canvas>
+<script>
+/**
+ * ==================================================
+ * ЭТАП 1-7: ЯДРО, ECS, МАТЕМАТИКА, ДАННЫЕ, ДВИЖЕНИЕ
+ * ==================================================
+ */
+
+// --- КОНФИГУРАЦИЯ И ТТХ ТАНКОВ ---
+const TANK_SPECS = {
+    TT: {
+        name: 'TT', shape: 'square', hp: 1000,
+        speedFwd: 0.7 * 3, speedBwd: 0.5 * 3, rotSpeed: 0.059, // Скалирование скорости для играбельности
+        armor: { front: 98, side: 49, rear: 31 },
+        dmgVsCopy: { front: 250, side: 650, rear: 9999 },
+        reload: 6800, deviation: 0.09, caliber: 115, turretType: 'free'
+    },
+    PT: {
+        name: 'PT', shape: 'triangle', hp: 750,
+        speedFwd: 0.64 * 3, speedBwd: 0.43 * 3, rotSpeed: 0.045,
+        armor: { front: 102, side: 35, rear: 21 },
+        dmgVsCopy: { front: 400, side: 650, rear: 9999 },
+        reload: 7600, deviation: 0.09, caliber: 149, turretType: 'limited'
+    },
+    LT: {
+        name: 'LT', shape: 'rhombus', hp: 850,
+        speedFwd: 0.91 * 3, speedBwd: 0.89 * 3, rotSpeed: 0.094,
+        armor: { front: 44, side: 19, rear: 10 },
+        dmgVsCopy: { front: 100, side: 350, rear: 9999 },
+        reload: 2900, deviation: 0.09, caliber: 58, turretType: 'free'
+    },
+    ST: {
+        name: 'ST', shape: 'pentagon', hp: 900,
+        speedFwd: 0.78 * 3, speedBwd: 0.61 * 3, rotSpeed: 0.075,
+        armor: { front: 72, side: 43, rear: 25 },
+        dmgVsCopy: { front: 200, side: 450, rear: 9999 },
+        reload: 4200, deviation: 0.09, caliber: 85, turretType: 'free'
+    }
+};
+
+// --- МАТЕМАТИЧЕСКАЯ БИБЛИОТЕКА ---
+const Vec2 = {
+    create: (x, y) => ({ x, y }),
+    add: (v1, v2) => ({ x: v1.x + v2.x, y: v1.y + v2.y }),
+    sub: (v1, v2) => ({ x: v1.x - v2.x, y: v1.y - v2.y }),
+    scale: (v, s) => ({ x: v.x * s, y: v.y * s }),
+    len: (v) => Math.sqrt(v.x * v.x + v.y * v.y),
+    norm: (v) => {
+        let l = Math.sqrt(v.x * v.x + v.y * v.y);
+        return l === 0 ? { x: 0, y: 0 } : { x: v.x / l, y: v.y / l };
+    },
+    dist: (v1, v2) => Math.sqrt(Math.pow(v1.x - v2.x, 2) + Math.pow(v1.y - v2.y, 2)),
+    dot: (v1, v2) => v1.x * v2.x + v1.y * v2.y,
+    rotate: (v, angle) => ({
+        x: v.x * Math.cos(angle) - v.y * Math.sin(angle),
+        y: v.x * Math.sin(angle) + v.y * Math.cos(angle)
+    }),
+    angle: (v) => Math.atan2(v.y, v.x)
+};
+
+const MathUtils = {
+    degToRad: (deg) => deg * (Math.PI / 180),
+    radToDeg: (rad) => rad * (180 / Math.PI),
+    clamp: (val, min, max) => Math.min(Math.max(val, min), max),
+    lerpAngle: (start, end, amount) => {
+        let cs = (1 - amount) * Math.cos(start) + amount * Math.cos(end);
+        let sn = (1 - amount) * Math.sin(start) + amount * Math.sin(end);
+        return Math.atan2(sn, cs);
+    }
+};
+
+// --- ECS CORE ---
+class Entity {
+    constructor(id) {
+        this.id = id;
+        this.components = {};
+    }
+    addComponent(component) {
+        this.components[component.name] = component;
+        return this;
+    }
+    getComponent(name) {
+        return this.components[name];
+    }
+    hasComponent(name) {
+        return !!this.components[name];
+    }
+}
+
+class World {
+    constructor() {
+        this.entities = [];
+        this.systems = [];
+        this.entityIdCounter = 0;
+    }
+    createEntity() {
+        return new Entity(this.entityIdCounter++);
+    }
+    addEntity(entity) {
+        this.entities.push(entity);
+    }
+    addSystem(system) {
+        this.systems.push(system);
+    }
+    update(dt) {
+        for (let system of this.systems) {
+            system.update(this.entities, dt);
+        }
+    }
+}
+
+// --- COMPONENTS ---
+class Component { constructor(name) { this.name = name; } }
+
+class Transform extends Component {
+    constructor(x, y, rotation = 0) {
+        super('Transform');
+        this.pos = Vec2.create(x, y);
+        this.rotation = rotation; // Радианы, корпус
+    }
+}
+
+class Velocity extends Component {
+    constructor() {
+        super('Velocity');
+        this.linear = Vec2.create(0, 0);
+        this.angular = 0;
+    }
+}
+
+class TankData extends Component {
+    constructor(type) {
+        super('TankData');
+        this.spec = TANK_SPECS[type];
+        this.turretRotation = 0; // Относительно мира, не корпуса
+        this.currentReload = 0;
+        this.hp = this.spec.hp;
+    }
+}
+
+class InputControl extends Component {
+    constructor() {
+        super('InputControl');
+        this.keys = { up: false, down: false, left: false, right: false, fire: false };
+    }
+}
+
+class Collider extends Component {
+    constructor(radius) {
+        super('Collider');
+        this.radius = radius;
+        this.boundingBox = { min: {x:0, y:0}, max: {x:0, y:0} };
+    }
+}
+
+// --- SYSTEMS ---
+
+// 1. Система ввода
+class InputSystem {
+    constructor() {
+        window.addEventListener('keydown', (e) => this.handleKey(e, true));
+        window.addEventListener('keyup', (e) => this.handleKey(e, false));
+        this.inputState = { w: false, s: false, a: false, d: false, '2': false };
+    }
+    handleKey(e, isDown) {
+        if (this.inputState.hasOwnProperty(e.key.toLowerCase())) {
+            this.inputState[e.key.toLowerCase()] = isDown;
+        }
+    }
+    update(entities, dt) {
+        entities.forEach(ent => {
+            if (ent.hasComponent('InputControl')) {
+                const input = ent.getComponent('InputControl');
+                input.keys.up = this.inputState['w'];
+                input.keys.down = this.inputState['s'];
+                input.keys.left = this.inputState['a'];
+                input.keys.right = this.inputState['d'];
+                input.keys.fire = this.inputState['2'];
+            }
+        });
+    }
+}
+
+// 2. Система движения танка
+class TankMovementSystem {
+    update(entities, dt) {
+        entities.forEach(ent => {
+            if (!ent.hasComponent('TankData') || !ent.hasComponent('Transform') || !ent.hasComponent('InputControl')) return;
+
+            const transform = ent.getComponent('Transform');
+            const data = ent.getComponent('TankData');
+            const input = ent.getComponent('InputControl').keys;
+            
+            // Поворот корпуса
+            let rotDir = 0;
+            if (input.left) rotDir = -1;
+            if (input.right) rotDir = 1;
+            
+            // Скорость поворота зависит от ТТХ
+            transform.rotation += rotDir * data.spec.rotSpeed * (dt / 16); 
+
+            // Движение вперед/назад
+            let speed = 0;
+            if (input.up) speed = data.spec.speedFwd;
+            if (input.down) speed = -data.spec.speedBwd;
+
+            // Вектор движения
+            const moveDir = Vec2.rotate({ x: 1, y: 0 }, transform.rotation); // 0 градусов = вправо, у нас перед = 0? 
+            // Корректировка: в Canvas 0 - вправо. Пусть танк смотрит вправо по дефолту.
+            
+            const velocity = Vec2.scale(moveDir, speed * (dt / 16));
+            transform.pos = Vec2.add(transform.pos, velocity);
+
+            // Обновление башни (камера/прицел)
+            // Для игрока башня всегда смотрит туда, куда смотрит танк (фиксированная камера), 
+            // НО по ТЗ: "Камера = направление взгляда". "Центр экрана = танк". 
+            // Реализуем поворот башни к курсору? Нет, "Управление: клавиатура".
+            // Значит башня поворачивается кнопками или мышью? 
+            // ТЗ: "Камера фиксированная, следует за танком".
+            // ТЗ: "Орудие свободное вращение" (кроме ПТ).
+            
+            // УПРОЩЕНИЕ ДЛЯ ЧАСТИ 1: Башня поворачивается за корпусом для ПТ, 
+            // и пока за корпусом для остальных, пока не добавим управление башней (обычно мышь, но тут только клава).
+            // Допустим, башня смотрит всегда вперед по ходу движения камеры, если камера фиксирована.
+            
+            data.turretRotation = transform.rotation; // Пока синхронно
+        });
+    }
+}
+
+// 3. Система рендеринга
+class RenderSystem {
+    constructor(canvasId) {
+        this.canvas = document.getElementById(canvasId);
+        this.ctx = this.canvas.getContext('2d');
+        this.offscreen = new OffscreenCanvas(2000, 2000); // Для фона
+        this.offCtx = this.offscreen.getContext('2d');
+        this.initBackground();
+        this.resize();
+        window.addEventListener('resize', () => this.resize());
+    }
+
+    resize() {
+        this.canvas.width = window.innerWidth;
+        this.canvas.height = window.innerHeight;
+    }
+
+    initBackground() {
+        // Рисуем сетку на оффскрин канвасе
+        const ctx = this.offCtx;
+        ctx.fillStyle = '#333';
+        ctx.fillRect(0, 0, 2000, 2000);
+        ctx.strokeStyle = '#444';
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        for(let i=0; i<=2000; i+=100) {
+            ctx.moveTo(i, 0); ctx.lineTo(i, 2000);
+            ctx.moveTo(0, i); ctx.lineTo(2000, i);
+        }
+        ctx.stroke();
+    }
+
+    drawShape(ctx, shape, size) {
+        ctx.beginPath();
+        if (shape === 'square') { // TT
+            ctx.rect(-size, -size, size*2, size*2);
+        } else if (shape === 'triangle') { // PT
+            ctx.moveTo(size, 0);
+            ctx.lineTo(-size, size);
+            ctx.lineTo(-size, -size);
+            ctx.closePath();
+        } else if (shape === 'rhombus') { // LT
+            ctx.moveTo(size, 0);
+            ctx.lineTo(0, size*0.7);
+            ctx.lineTo(-size, 0);
+            ctx.lineTo(0, -size*0.7);
+            ctx.closePath();
+        } else if (shape === 'pentagon') { // ST
+            const step = (Math.PI * 2) / 5;
+            for(let i=0; i<5; i++) {
+                const angle = i * step;
+                const x = size * Math.cos(angle);
+                const y = size * Math.sin(angle);
+                if (i===0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            }
+            ctx.closePath();
+        }
+        ctx.fill();
+        ctx.stroke();
+    }
+
+    update(entities, dt) {
+        const ctx = this.ctx;
+        const w = this.canvas.width;
+        const h = this.canvas.height;
+
+        // 1. Найти игрока для камеры
+        let playerTransform = null;
+        let playerEnt = entities.find(e => e.hasComponent('InputControl')); // Игрок
+        if (playerEnt) playerTransform = playerEnt.getComponent('Transform');
+
+        // Очистка
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, w, h);
+
+        ctx.save();
+        
+        // 2. Камера (Центрирование)
+        if (playerTransform) {
+            ctx.translate(w/2 - playerTransform.pos.x, h/2 - playerTransform.pos.y);
+        }
+
+        // 3. Рисуем фон (оптимизация через Offscreen)
+        ctx.drawImage(this.offscreen, -1000, -1000);
+
+        // 4. Рисуем сущности
+        entities.forEach(ent => {
+            if (ent.hasComponent('Transform') && ent.hasComponent('TankData')) {
+                const tr = ent.getComponent('Transform');
+                const data = ent.getComponent('TankData');
+                const size = 20; // Базовый размер
+
+                ctx.save();
+                ctx.translate(tr.pos.x, tr.pos.y);
+                
+                // Рисуем корпус
+                ctx.save();
+                ctx.rotate(tr.rotation);
+                ctx.fillStyle = '#6a8'; // Зеленый танк
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                this.drawShape(ctx, data.spec.shape, size);
+                
+                // Зоны брони (Визуализация для отладки)
+                // Front (красная линия спереди)
+                ctx.beginPath();
+                ctx.strokeStyle = 'red';
+                ctx.lineWidth = 3;
+                ctx.moveTo(size, -size/2);
+                ctx.lineTo(size, size/2); // Условная передняя грань для квадрата
+                ctx.stroke();
+                ctx.restore();
+
+                // Рисуем башню/пушку
+                ctx.save();
+                ctx.rotate(data.turretRotation);
+                ctx.fillStyle = '#464';
+                ctx.fillRect(0, -5, size * 1.5, 10); // Ствол
+                ctx.beginPath();
+                ctx.arc(0, 0, 8, 0, Math.PI*2); // Башня
+                ctx.fill();
+                ctx.stroke();
+                
+                // Иконка прицела (белая точка на конце пушки)
+                if (ent === playerEnt) {
+                    ctx.fillStyle = 'white';
+                    ctx.beginPath();
+                    ctx.arc(size * 1.5 + 50, 0, 3, 0, Math.PI*2); // Прицел
+                    ctx.fill();
+                }
+
+                ctx.restore();
+                ctx.restore();
+            }
+        });
+
+        ctx.restore();
+        
+        // UI
+        if (playerEnt) {
+            const data = playerEnt.getComponent('TankData');
+            ctx.fillStyle = 'white';
+            ctx.font = '16px monospace';
+            ctx.fillText(`Tank: ${data.spec.name} | HP: ${data.hp}`, 20, 30);
+            ctx.fillText(`Pos: ${Math.round(playerTransform.pos.x)}, ${Math.round(playerTransform.pos.y)}`, 20, 50);
+        }
+    }
+}
+
+  /**
+ * ==================================================
+ * ЭТАП 8-14: БОЕВАЯ СИСТЕМА, RAYCAST, УРОН
+ * ==================================================
+ */
+
+// --- НОВЫЕ КОМПОНЕНТЫ ---
+
+class RayTrace extends Component {
+    constructor(segments, duration = 4000) {
+        super('RayTrace');
+        this.segments = segments; // Массив {p1, p2, isRicochet}
+        this.lifeTime = duration;
+        this.maxLifeTime = duration;
+    }
+}
+
+// --- МАТЕМАТИКА КОЛЛИЗИЙ И ГЕОМЕТРИИ ---
+
+const GeoUtils = {
+    // Получить вершины полигона танка и типы брони для каждой грани
+    getTankVerticesAndZones: (transform, spec) => {
+        const { pos, rotation } = transform;
+        const size = 20; // Базовый размер (синхронизирован с RenderSystem)
+        const vertices = [];
+        const zones = []; // 'front', 'side', 'rear' для каждой грани (от i до i+1)
+
+        const cos = Math.cos(rotation);
+        const sin = Math.sin(rotation);
+        
+        // Локальные вершины -> Глобальные
+        const toGlobal = (lx, ly) => ({
+            x: pos.x + (lx * cos - ly * sin),
+            y: pos.y + (lx * sin + ly * cos)
+        });
+
+        if (spec.shape === 'square') { // ТТ
+            // 0: TopLeft, 1: TopRight, 2: BotRight, 3: BotLeft
+            // В RenderSystem: rect(-s, -s, 2s, 2s)
+            // Перед (Front) - это ось X+ (вправо) в Canvas по дефолту. 
+            // Но мы рисовали Front как size, 0.
+            // Определим грани относительно "взгляда" (X+ локально).
+            
+            // Вершины по часовой, начиная с "носа" (X+)
+            vertices.push(toGlobal(size, -size)); // Top Front
+            vertices.push(toGlobal(size, size));  // Bot Front
+            vertices.push(toGlobal(-size, size)); // Bot Rear
+            vertices.push(toGlobal(-size, -size));// Top Rear
+            
+            // Грани (от i до i+1):
+            zones.push('front'); // (size,-size) -> (size,size) [Правая грань в локальных, Перед по логике]
+            zones.push('side');  // (size,size) -> (-size,size)
+            zones.push('rear');  // (-size,size) -> (-size,-size)
+            zones.push('side');  // (-size,-size) -> (size,-size)
+            
+        } else if (spec.shape === 'triangle') { // ПТ
+            // Front: (size, 0), TopBack: (-size, -size), BotBack: (-size, size)
+            vertices.push(toGlobal(size, 0));
+            vertices.push(toGlobal(-size, size));
+            vertices.push(toGlobal(-size, -size));
+            
+            zones.push('side'); // Front -> Bottom
+            zones.push('rear'); // Bottom -> Top (Задняя стенка)
+            zones.push('side'); // Top -> Front
+            // ПРИМЕЧАНИЕ: У треугольника "Front" - это вершина.
+            // Попадание в боковые грани ближе к переду считается Front?
+            // Упростим: грани треугольника - это скошенные борта (Side). 
+            // Но ТЗ говорит "Front: 102мм". Значит, проекция спереди. 
+            // Реализуем проверку угла попадания позже. Пока считаем наклонные грани - Side, но с правилом "ПТ лоб".
+            // FIX: Для ПТ грани, смотрящие вперед, помечаем как Front для расчета пробития, если угол мал.
+            // Но следуя ТЗ жестко: зоны привязаны к сторонам. 
+            // Пусть 2 наклонные = Front (рубка), Задняя = Rear. Side у ПТ - это "условность" или маленький борт?
+            // Поправим логику зон по нормалям при расчете урона.
+            zones[0] = 'front';
+            zones[2] = 'front';
+            
+        } else if (spec.shape === 'rhombus') { // ЛТ
+            vertices.push(toGlobal(size, 0));
+            vertices.push(toGlobal(0, size * 0.7));
+            vertices.push(toGlobal(-size, 0));
+            vertices.push(toGlobal(0, -size * 0.7));
+            
+            zones.push('front'); // TopRight
+            zones.push('rear');  // BotRight (или side?)
+            zones.push('rear');  // BotLeft
+            zones.push('front'); // TopLeft
+            // Логика: передние грани - front, задние - rear. Side - очень мало.
+            
+        } else if (spec.shape === 'pentagon') { // СТ
+            const step = (Math.PI * 2) / 5;
+            for(let i=0; i<5; i++) {
+                vertices.push(toGlobal(size * Math.cos(i * step), size * Math.sin(i * step)));
+            }
+            // 0 (Front), 1 (BotFront), 2 (BotRear), 3 (TopRear), 4 (TopFront)
+            zones.push('front');
+            zones.push('side');
+            zones.push('rear');
+            zones.push('rear'); // или Side
+            zones.push('front'); // или Side
+            // Упростим СТ: 0-1 Front, 1-2 Side, 2-3 Rear, 3-4 Side, 4-0 Front
+            zones[0] = 'front'; zones[1] = 'side'; zones[2] = 'rear'; zones[3] = 'rear'; zones[4] = 'front';
+        }
+
+        return { vertices, zones };
+    },
+
+    // Пересечение луча (p1, p2) и отрезка (p3, p4)
+    getIntersection: (p1, p2, p3, p4) => {
+        const x1 = p1.x, y1 = p1.y, x2 = p2.x, y2 = p2.y;
+        const x3 = p3.x, y3 = p3.y, x4 = p4.x, y4 = p4.y;
+
+        const denom = (y4 - y3) * (x2 - x1) - (x4 - x3) * (y2 - y1);
+        if (denom === 0) return null; // Параллельны
+
+        const ua = ((x4 - x3) * (y1 - y3) - (y4 - y3) * (x1 - x3)) / denom;
+        const ub = ((x2 - x1) * (y1 - y3) - (y2 - y1) * (x1 - x3)) / denom;
+
+        if (ua >= 0 && ua <= 1 && ub >= 0 && ub <= 1) {
+            return {
+                x: x1 + ua * (x2 - x1),
+                y: y1 + ua * (y2 - y1),
+                t: ua // дистанция (0..1)
+            };
+        }
+        return null;
+    }
+};
+
+// --- СИСТЕМА БОЯ И ФИЗИКИ СНАРЯДОВ ---
+
+class CombatSystem {
+    constructor(world) {
+        this.world = world;
+    }
+
+    // Главная логика выстрела
+    fire(shooterEnt) {
+        const data = shooterEnt.getComponent('TankData');
+        const transform = shooterEnt.getComponent('Transform');
+
+        // Проверка перезарядки
+        if (data.currentReload > 0) return;
+        data.currentReload = data.spec.reload;
+
+        // Расчет направления с разбросом
+        // Шанс отклонения 9% (простая реализация: +/- отклонение)
+        let angle = transform.rotation; // Или data.turretRotation
+        if (Math.random() < 0.09) {
+            angle += (Math.random() - 0.5) * 0.2; // Небольшой джиттер
+        }
+
+        const startPos = Vec2.add(transform.pos, Vec2.scale({x: Math.cos(angle), y: Math.sin(angle)}, 25)); // Чуть впереди танка
+        const direction = { x: Math.cos(angle), y: Math.sin(angle) };
+        
+        this.processRay(shooterEnt, startPos, direction, data.spec.caliber, 0);
+    }
+
+    processRay(shooter, start, dir, caliber, bounces) {
+        if (bounces > 3) return; // Лимит рикошетов
+
+        let maxDist = 2000; // Длина луча (за пределы экрана)
+        let end = Vec2.add(start, Vec2.scale(dir, maxDist));
+        
+        let closestHit = null;
+        let minT = 1.0;
+        let hitEntity = null;
+        let hitZone = null;
+        let hitNormal = null;
+
+        // 1. Проверка коллизий со всеми танками
+        this.world.entities.forEach(target => {
+            if (target === shooter) return; // Не попадать в себя
+            if (!target.hasComponent('TankData')) return;
+
+            const tTransform = target.getComponent('Transform');
+            const tData = target.getComponent('TankData');
+            
+            // Получаем полигон цели
+            const poly = GeoUtils.getTankVerticesAndZones(tTransform, tData.spec);
+            
+            // Проверяем каждую грань
+            for (let i = 0; i < poly.vertices.length; i++) {
+                const p3 = poly.vertices[i];
+                const p4 = poly.vertices[(i + 1) % poly.vertices.length];
+                const zone = poly.zones[i];
+
+                const hit = GeoUtils.getIntersection(start, end, p3, p4);
+                if (hit && hit.t < minT) {
+                    minT = hit.t;
+                    closestHit = { x: hit.x, y: hit.y };
+                    hitEntity = target;
+                    hitZone = zone;
+                    
+                    // Нормаль грани
+                    const dx = p4.x - p3.x;
+                    const dy = p4.y - p3.y;
+                    hitNormal = Vec2.norm({ x: -dy, y: dx }); // Нормаль влево от вектора грани
+                }
+            }
+        });
+
+        // 2. Если попали
+        if (closestHit) {
+            end = closestHit;
+
+            // Расчет угла попадания
+            // Угол между инвертированным лучом и нормалью
+            const incident = Vec2.norm(dir);
+            const dot = Vec2.dot(Vec2.scale(incident, -1), hitNormal);
+            // dot = 1 -> перпендикуляр, dot = 0 -> параллельно
+            // Угол падения (от нормали): acos(dot)
+            const angleOfIncidence = Math.acos(dot); // в радианах
+            const angleDeg = MathUtils.radToDeg(angleOfIncidence);
+
+            // ЛОГИКА РИКОШЕТА
+            // Рикошет если угол > 70 градусов (касательная)
+            // Исключение: Правило 3 калибров (если калибр > брони * 3 -> рикошета нет)
+            
+            const targetArmor = hitEntity.getComponent('TankData').spec.armor[hitZone] || 10;
+            const isRicochetAngle = angleDeg > 70;
+            const isOverMatch = caliber > targetArmor * 3;
+            
+            const doRicochet = isRicochetAngle && !isOverMatch;
+
+            // Добавляем сегмент луча для отрисовки
+            this.addRaySegment(start, end, doRicochet);
+
+            if (doRicochet) {
+                // Вычисляем вектор отражения: R = D - 2*(D . N)*N
+                const reflect = Vec2.sub(dir, Vec2.scale(hitNormal, 2 * Vec2.dot(dir, hitNormal)));
+                // Рекурсивный запуск луча
+                this.processRay(shooter, end, reflect, caliber, bounces + 1);
+            } else {
+                // ПРОБИТИЕ / УРОН
+                this.applyDamage(shooter, hitEntity, hitZone);
+            }
+
+        } else {
+            // Луч улетел в молоко
+            this.addRaySegment(start, end, false);
+        }
+    }
+
+    addRaySegment(p1, p2, isRicochet) {
+        // Создаем сущность визуализации луча
+        const rayEnt = this.world.createEntity();
+        rayEnt.addComponent(new RayTrace([{ p1, p2, isRicochet }], 4000));
+        this.world.addEntity(rayEnt);
+    }
+
+    applyDamage(shooter, target, zone) {
+        const sSpec = shooter.getComponent('TankData').spec;
+        const tSpec = target.getComponent('TankData').spec;
+        const tData = target.getComponent('TankData');
+
+        let isOneShot = false;
+
+        // === ВАНШОТ ПРАВИЛА (ВЫСШИЙ ПРИОРИТЕТ) ===
+        
+        // 1. Rear -> Instant Kill
+        if (zone === 'rear') isOneShot = true;
+
+        // 2. ПТ -> ЛТ (лоб)
+        if (sSpec.name === 'PT' && tSpec.name === 'LT' && zone === 'front') isOneShot = true;
+
+        // 3. ТТ -> ЛТ (борт)
+        if (sSpec.name === 'TT' && tSpec.name === 'LT' && zone === 'side') isOneShot = true;
+
+        if (isOneShot) {
+            tData.hp = 0;
+            console.log("ONE SHOT!");
+        } else {
+            // === ОБЫЧНЫЙ УРОН ===
+            // Берем урон из ТТХ стреляющего (dmgVsCopy) для соответствующей зоны
+            // Если такой зоны нет в таблице урона, берем Front как базу
+            let dmg = sSpec.dmgVsCopy[zone] || sSpec.dmgVsCopy['front'];
+            
+            // Простая формула пробития: если Калибр < Брони, урон может быть снижен или 0
+            // Но ТЗ говорит "Рикошет зависит от угла, калибра, брони". 
+            // Мы уже проверили рикошет выше. Если дошли сюда -> пробитие возможно.
+            // Применяем урон.
+            
+            tData.hp -= dmg;
+        }
+
+        // Смерть
+        if (tData.hp <= 0) {
+            tData.hp = 0;
+            // Можно добавить визуальный эффект смерти или респаун
+            // Для простоты: телепортируем манекен (respawn)
+            if (!target.hasComponent('InputControl')) { // Если это бот
+                 target.getComponent('Transform').pos = {x: Math.random()*800, y: Math.random()*600};
+                 tData.hp = tSpec.hp;
+            } else {
+                console.log("PLAYER DEAD");
+                // Reset player
+                tData.hp = tSpec.hp;
+                target.getComponent('Transform').pos = {x: 0, y: 0};
+            }
+        }
+    }
+
+    update(entities, dt) {
+        // Обработка перезарядки
+        entities.forEach(ent => {
+            if (ent.hasComponent('TankData')) {
+                const data = ent.getComponent('TankData');
+                if (data.currentReload > 0) data.currentReload -= dt;
+            }
+            
+            // Обработка ввода стрельбы
+            if (ent.hasComponent('InputControl') && ent.hasComponent('TankData')) {
+                const input = ent.getComponent('InputControl');
+                if (input.keys.fire) {
+                    this.fire(ent);
+                    input.keys.fire = false; // Сброс (semi-auto)
+                }
+            }
+        });
+    }
+}
+
+// 4. Система рендеринга лучей (отдельно поверх всего)
+class RayRenderSystem {
+    constructor(canvasId) {
+        this.ctx = document.getElementById(canvasId).getContext('2d');
+    }
+    update(entities, dt) {
+        const ctx = this.ctx;
+        // Нам нужно смещение камеры. Хакаем доступ к RenderSystem или вычисляем заново.
+        // Чтобы не ломать архитектуру, найдем игрока снова.
+        let playerPos = {x:0, y:0};
+        const player = entities.find(e => e.hasComponent('InputControl'));
+        if (player) playerPos = player.getComponent('Transform').pos;
+        const w = ctx.canvas.width;
+        const h = ctx.canvas.height;
+
+        ctx.save();
+        ctx.translate(w/2 - playerPos.x, h/2 - playerPos.y);
+
+        entities.forEach(ent => {
+            if (ent.hasComponent('RayTrace')) {
+                const ray = ent.getComponent('RayTrace');
+                ray.lifeTime -= dt;
+
+                // Альфа канал зависит от времени
+                const alpha = MathUtils.clamp(ray.lifeTime / 1000, 0, 1);
+                
+                ctx.lineWidth = 2;
+                
+                ray.segments.forEach(seg => {
+                    ctx.beginPath();
+                    ctx.moveTo(seg.p1.x, seg.p1.y);
+                    ctx.lineTo(seg.p2.x, seg.p2.y);
+                    
+                    // Цвет: Желтый если рикошет, Белый/Оранжевый обычный
+                    if (seg.isRicochet) ctx.strokeStyle = `rgba(255, 255, 0, ${alpha})`;
+                    else ctx.strokeStyle = `rgba(255, 100, 50, ${alpha})`;
+                    
+                    ctx.stroke();
+                });
+
+                if (ray.lifeTime <= 0) {
+                    // Удаление сущности (в реальном ECS нужен removeEntity, здесь просто скроем или почистим массив world.entities)
+                    // Хак для простоты: обнулим компоненты
+                    ent.components = {}; 
+                }
+            }
+        });
+
+        // Очистка мертвых сущностей (простой Garbage Collection)
+        // В реальном движке это делается иначе
+        for (let i = entities.length - 1; i >= 0; i--) {
+            if (entities[i].components && Object.keys(entities[i].components).length === 0) {
+                entities.splice(i, 1);
+            }
+        }
+
+        ctx.restore();
+    }
+          }
+  
+// --- MAIN INIT ---
+const world = new World();
+const renderSystem = new RenderSystem('gameCanvas');
+const rayRenderSystem = new RayRenderSystem('gameCanvas');
+const inputSystem = new InputSystem();
+const movementSystem = new TankMovementSystem();
+const combatSystem = new CombatSystem(world);
+
+world.addSystem(inputSystem);
+world.addSystem(movementSystem);
+// Render system вызывается вручную через requestAnimationFrame
+
+// Создаем игрока (Выбери танк здесь: 'TT', 'PT', 'LT', 'ST')
+const player = world.createEntity();
+player.addComponent(new Transform(0, 0, 0))
+      .addComponent(new Velocity())
+      .addComponent(new TankData('TT')) // <-- СМЕНИТЬ ТАНК ТУТ
+      .addComponent(new InputControl())
+      .addComponent(new Collider(30));
+world.addEntity(player);
+
+// Добавим манекен для теста
+const dummy = world.createEntity();
+dummy.addComponent(new Transform(200, 100, Math.PI))
+     .addComponent(new Velocity())
+     .addComponent(new TankData('LT'))
+     .addComponent(new Collider(30));
+world.addEntity(dummy);
+
+let lastTime = performance.now();
+
+function loop(currentTime) {
+    const dt = currentTime - lastTime;
+    lastTime = currentTime;
+
+    world.update(dt);
+    renderSystem.update(world.entities, dt);
+    rayRenderSystem.update(world.entities, dt);
+  
+    requestAnimationFrame(loop);
+}
+
+requestAnimationFrame(loop);
+
+</script>
+</body>
+</html>
+
