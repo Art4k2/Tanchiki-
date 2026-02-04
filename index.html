@@ -49,92 +49,10 @@
 }
         body, html { margin: 0; padding: 0; overflow: hidden; background: #222; }
         canvas { display: block; }
-
-        /* --- СТИЛИ НАСТРОЕК --- */
-#settings-wrapper {
-    position: absolute;
-    top: 20px;
-    left: 20px;
-    z-index: 100;
-}
-
-#gear-btn {
-    font-size: 30px;
-    cursor: pointer;
-    background: rgba(0,0,0,0.5);
-    border-radius: 5px;
-    padding: 5px 10px;
-    color: white;
-    border: 1px solid #555;
-}
-
-#settings-menu {
-    display: none; /* Скрыто по умолчанию */
-    background: rgba(30, 30, 30, 0.9);
-    border: 1px solid #777;
-    padding: 15px;
-    margin-top: 10px;
-    border-radius: 8px;
-    color: white;
-    font-family: sans-serif;
-}
-
-.menu-section { margin-bottom: 15px; }
-.menu-section label { display: block; margin-bottom: 5px; font-size: 12px; color: #aaa; }
-.tank-select {
-    background: #444; color: white; border: 1px solid #666;
-    padding: 5px; width: 100%; border-radius: 4px;
-}
-
-/* Доп. кнопки для башни в нижнем UI */
-#turret-controls {
-    display: flex; gap: 10px; margin-bottom: 10px;
-}
     </style>
 </head>
 <body>
-    <div id="settings-wrapper">
-    <div id="gear-btn" onclick="toggleSettings()">⚙️</div>
-    <div id="settings-menu" id="menu">
-        <div class="menu-section">
-            <label>ВАШ ТАНК:</label>
-            <select class="tank-select" onchange="changeTankType(player, this.value)">
-                <option value="TT">Тяжелый (TT)</option>
-                <option value="ST">Средний (ST)</option>
-                <option value="LT">Легкий (LT)</option>
-                <option value="PT">ПТ-САУ (PT)</option>
-            </select>
-        </div>
-        <div class="menu-section">
-            <label>ТАНК МАНЕКЕНА:</label>
-            <select class="tank-select" onchange="changeTankType(dummy, this.value)">
-                <option value="LT">Легкий (LT)</option>
-                <option value="ST">Средний (ST)</option>
-                <option value="TT">Тяжелый (TT)</option>
-                <option value="PT">ПТ-САУ (PT)</option>
-            </select>
-        </div>
-    </div>
-</div>
-
 <div id="ui-layer">
-    <div class="control-group">
-        <div id="turret-controls">
-            <div class="btn" id="btn-q" style="width: 95px;">TURRET ⟲</div>
-            <div class="btn" id="btn-e" style="width: 95px;">TURRET ⟳</div>
-        </div>
-        <div class="btn" id="btn-w">W</div>
-        <div class="row">
-            <div class="btn" id="btn-a">A</div>
-            <div class="btn" id="btn-s">S</div>
-            <div class="btn" id="btn-d">D</div>
-        </div>
-    </div>
-    <div class="control-group">
-        <div class="btn" id="btn-fire">FIRE</div>
-    </div>
-</div>
-    <div id="ui-layer">
     <div class="control-group">
         <div class="btn" id="btn-w">W</div>
         <div class="row">
@@ -335,48 +253,19 @@ class InputSystem {
 class TankMovementSystem {
     update(entities, dt) {
         entities.forEach(ent => {
-            if (!ent.hasComponent('TankData') || !ent.hasComponent('Transform')) return;
+            if (!ent.hasComponent('TankData') || !ent.hasComponent('Transform') || !ent.hasComponent('InputControl')) return;
 
             const transform = ent.getComponent('Transform');
             const data = ent.getComponent('TankData');
-            const input = ent.hasComponent('InputControl') ? ent.getComponent('InputControl').keys : null;
+            const input = ent.getComponent('InputControl').keys;
             
-            if (input) {
-                // ДВИЖЕНИЕ КОРПУСА
-                let rotDir = 0;
-                if (input.left) rotDir = -1;
-                if (input.right) rotDir = 1;
-                transform.rotation += rotDir * data.spec.rotSpeed * (dt / 16); 
-
-                let speed = 0;
-                if (input.up) speed = data.spec.speedFwd;
-                if (input.down) speed = -data.spec.speedBwd;
-                const moveDir = Vec2.rotate({ x: 1, y: 0 }, transform.rotation);
-                transform.pos = Vec2.add(transform.pos, Vec2.scale(moveDir, speed * (dt / 16)));
-
-                // ВРАЩЕНИЕ БАШНИ (ОТДЕЛЬНО)
-                // Башня вращается кнопками Q / E (на мобилках добавлены в UI)
-                let tRotDir = 0;
-                if (input.turretLeft) tRotDir = -1;
-                if (input.turretRight) tRotDir = 1;
-
-                // Скорость вращения башни (у ПТ она ограничена или медленнее)
-                let tSpeed = 0.04; 
-                
-                if (data.spec.turretType === 'limited') {
-                    // Логика ПТ: башня не может крутиться на 360
-                    let diff = data.turretRotation - transform.rotation;
-                    // Ограничение в 15 градусов
-                    if (Math.abs(diff + tRotDir * tSpeed) < 0.26) {
-                        data.turretRotation += tRotDir * tSpeed * (dt / 16);
-                    }
-                } else {
-                    data.turretRotation += tRotDir * tSpeed * (dt / 16);
-                }
-            }
-        });
-    }
-}
+            // Поворот корпуса
+            let rotDir = 0;
+            if (input.left) rotDir = -1;
+            if (input.right) rotDir = 1;
+            
+            // Скорость поворота зависит от ТТХ
+            transform.rotation += rotDir * data.spec.rotSpeed * (dt / 16); 
 
             // Движение вперед/назад
             let speed = 0;
@@ -556,7 +445,7 @@ class RenderSystem {
     }
 }
 
-  /**
+/**
  * ==================================================
  * ЭТАП 8-14: БОЕВАЯ СИСТЕМА, RAYCAST, УРОН
  * ==================================================
@@ -936,8 +825,7 @@ class RayRenderSystem {
 
         ctx.restore();
     }
-          }
-  
+                }
 // --- MAIN INIT ---
 // --- 1. ИНИЦИАЛИЗАЦИЯ МИРА И СИСТЕМ ---
 const world = new World();
@@ -1008,28 +896,6 @@ function loop(currentTime) {
 // ЗАПУСК
 requestAnimationFrame(loop);
 
- // Переключение меню
-function toggleSettings() {
-    const menu = document.getElementById('settings-menu');
-    menu.style.display = menu.style.display === 'block' ? 'none' : 'block';
-}
-
-// Смена типа танка "на лету"
-function changeTankType(entity, type) {
-    if (!entity || !TANK_SPECS[type]) return;
-    const data = entity.getComponent('TankData');
-    data.spec = TANK_SPECS[type];
-    data.hp = data.spec.hp; // Сброс HP при смене
-    console.log(`Changed to ${type}`);
-}
-
-// Не забудь добавить новые кнопки в InputSystem (в конец функции setupTouchControl блока)
-setupTouchControl('btn-q', 'turretLeft');
-setupTouchControl('btn-e', 'turretRight');
-
-// Также обнови InputSystem.handleKey, чтобы он понимал Q и E
-// (Или просто добавь их в inputState в классе InputSystem)
-// В классе InputSystem измени: this.inputState = { w:f, s:f, a:f, d:f, '2':f, q:f, e:f };   
 </script>
 </body>
 </html>
